@@ -1,0 +1,212 @@
+# ==========================================================
+# REAL-WORLD AZURE PIPELINES CI/CD PROJECT
+# ==========================================================
+
+
+# ----------------------------------------------------------
+# CI TRIGGER
+# ----------------------------------------------------------
+
+# Run the pipeline after changes reach main.
+trigger:
+  branches:
+    include:
+      - main
+
+
+# ----------------------------------------------------------
+# VARIABLES
+# ----------------------------------------------------------
+
+variables:
+
+# Values stored centrally in Azure DevOps Library.
+- group: pipeline-webapp-vars
+
+- name: pythonVersion
+  value: '3.12'
+
+
+# ==========================================================
+# STAGE 1 - BUILD
+# ==========================================================
+
+stages:
+
+- stage: Build
+  displayName: 'Build and Test'
+
+  jobs:
+
+  - job: BuildApplication
+    displayName: 'Build Python Application'
+
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    steps:
+
+    # Download repository.
+    - checkout: self
+
+    # Configure Python.
+    - task: UsePythonVersion@0
+      displayName: 'Configure Python'
+      inputs:
+        versionSpec: '$(pythonVersion)'
+
+    # Install dependencies.
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+
+    # Run automated tests.
+    # Pipeline stops here if tests fail.
+    - script: |
+        pytest -v
+      displayName: 'Run tests'
+
+
+    # ------------------------------------------------------
+    # PREPARE DEPLOYMENT PACKAGE
+    # ------------------------------------------------------
+
+    # Copy only application deployment files.
+    - task: CopyFiles@2
+      displayName: 'Prepare application files'
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)'
+        Contents: |
+          app.py
+          requirements.txt
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/package'
+
+
+    # ------------------------------------------------------
+    # CREATE ZIP
+    # ------------------------------------------------------
+
+    - task: ArchiveFiles@2
+      displayName: 'Create deployment ZIP'
+      inputs:
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/package'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/webapp.zip'
+        replaceExistingArchive: true
+
+
+    # ------------------------------------------------------
+    # PUBLISH ARTIFACT
+    # ------------------------------------------------------
+
+    - publish: '$(Build.ArtifactStagingDirectory)/webapp.zip'
+      artifact: webapp
+      displayName: 'Publish application artifact'
+
+
+# ==========================================================
+# STAGE 2 - STAGING
+# ==========================================================
+
+- stage: DeployStaging
+
+  displayName: 'Deploy to Staging'
+
+  # Staging can only execute after Build succeeds.
+  dependsOn: Build
+
+  condition: succeeded()
+
+  jobs:
+
+  # Deployment jobs are specifically designed for deployments.
+  - deployment: DeployStagingWebApp
+
+    displayName: 'Deploy Staging Web App'
+
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    # Associates this deployment with an Azure DevOps Environment.
+    environment: pipeline-staging
+
+    strategy:
+
+      runOnce:
+
+        deploy:
+
+          steps:
+
+          # Download the exact artifact produced by Build.
+          - download: current
+            artifact: webapp
+
+
+          # Deploy the ZIP to Azure App Service.
+          - task: AzureWebApp@1
+
+            displayName: 'Deploy application to staging'
+
+            inputs:
+
+              azureSubscription: '$(azureServiceConnection)'
+
+              appType: 'webAppLinux'
+
+              appName: '$(stagingWebAppName)'
+
+              package: '$(Pipeline.Workspace)/webapp/webapp.zip'
+
+
+# ==========================================================
+# STAGE 3 - PRODUCTION
+# ==========================================================
+
+- stage: DeployProduction
+
+  displayName: 'Deploy to Production'
+
+  dependsOn: DeployStaging
+
+  condition: succeeded()
+
+  jobs:
+
+  - deployment: DeployProductionWebApp
+
+    displayName: 'Deploy Production Web App'
+
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    # This environment has the manual approval configured earlier.
+    environment: pipeline-production
+
+    strategy:
+
+      runOnce:
+
+        deploy:
+
+          steps:
+
+          - download: current
+            artifact: webapp
+
+
+          - task: AzureWebApp@1
+
+            displayName: 'Deploy application to production'
+
+            inputs:
+
+              azureSubscription: '$(azureServiceConnection)'
+
+              appType: 'webAppLinux'
+
+              appName: '$(productionWebAppName)'
+
+              package: '$(Pipeline.Workspace)/webapp/webapp.zip'
